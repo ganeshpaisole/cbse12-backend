@@ -7,33 +7,21 @@ require('dotenv').config();
 const app = express();
 
 // ── SECURITY HEADERS ──────────────────────
-app.use(helmet());
+app.use(helmet({ crossOriginResourcePolicy: false }));
 
-// ── CORS — only allow your Netlify domain ──
-const allowedOrigins = [
-  'https://cbseexamwala.netlify.app',
-  'https://ganeshpaisole.github.io',
-  'http://localhost:3000',  // for local dev
-  'http://localhost:5500',
-];
-
+// ── CORS — open during setup, restrict later ──
 app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, curl)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    callback(new Error('CORS: origin not allowed — ' + origin));
-  },
-  methods: ['POST', 'GET'],
+  origin: '*',
+  methods: ['POST', 'GET', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
-app.use(express.json({ limit: '10kb' }));  // prevent large payload attacks
+app.use(express.json({ limit: '10kb' }));
 
 // ── GLOBAL RATE LIMIT ────────────────────
 const globalLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,   // 1 hour window
-  max: 50,                     // 50 requests per IP per hour
+  windowMs: 60 * 60 * 1000,
+  max: 50,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests. Please wait before trying again.' },
@@ -54,19 +42,14 @@ app.get('/health', (req, res) => {
   });
 });
 
-// ── 404 HANDLER ──────────────────────────
-app.use((req, res) => {
-  res.status(404).json({ error: 'Endpoint not found' });
-});
-
-// ── ERROR HANDLER ────────────────────────
+app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 app.use((err, req, res, next) => {
   console.error('[ERROR]', err.message);
   res.status(500).json({ error: 'Internal server error' });
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`CBSE12 Backend running on port ${PORT}`);
-  console.log(`API key configured: ${process.env.ANTHROPIC_API_KEY ? 'YES ✅' : 'NO ❌'}`);
+  console.log(`API key: ${process.env.ANTHROPIC_API_KEY ? 'SET ✅' : 'MISSING ❌'}`);
 });
