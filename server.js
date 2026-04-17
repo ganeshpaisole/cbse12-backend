@@ -9,14 +9,20 @@ const app = express();
 // ── TRUST RAILWAY'S PROXY ─────────────────────
 app.set('trust proxy', 1);
 
-// ── SECURITY HEADERS ──────────────────────────
-app.use(helmet({ crossOriginResourcePolicy: false }));
-
-// ── CORS ──────────────────────────────────────
-app.use(cors({
+// ── CORS — explicit preflight handling ────────
+const corsOptions = {
   origin: '*',
-  methods: ['POST', 'GET', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+  optionsSuccessStatus: 200,  // some mobile browsers choke on 204
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));  // handle preflight for ALL routes
+
+// ── SECURITY HEADERS ──────────────────────────
+app.use(helmet({
+  crossOriginResourcePolicy: false,
+  crossOriginOpenerPolicy: false,
 }));
 
 app.use(express.json({ limit: '10kb' }));
