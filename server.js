@@ -6,43 +6,45 @@ require('dotenv').config();
 
 const app = express();
 
-// ── TRUST RAILWAY'S PROXY ─────────────────────
+// Trust Railway proxy
 app.set('trust proxy', 1);
 
-// ── CORS — explicit preflight handling ────────
-const corsOptions = {
-  origin: '*',
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
-  optionsSuccessStatus: 200,  // some mobile browsers choke on 204
-};
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));  // handle preflight for ALL routes
+// CORS — allow all origins
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  next();
+});
 
-// ── SECURITY HEADERS ──────────────────────────
+// Minimal security headers — don't block anything
 app.use(helmet({
-  crossOriginResourcePolicy: false,
-  crossOriginOpenerPolicy: false,
+  crossOriginResourcePolicy:     { policy: 'cross-origin' },
+  crossOriginOpenerPolicy:       false,
+  contentSecurityPolicy:         false,
 }));
 
 app.use(express.json({ limit: '10kb' }));
 
-// ── RATE LIMITING ─────────────────────────────
+// Rate limiting
 const globalLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 50,
+  max: 100,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Too many requests. Please wait before trying again.' },
+  message: { error: 'Too many requests. Please wait.' },
 });
 app.use('/api/', globalLimiter);
 
-// ── ROUTES ────────────────────────────────────
+// Routes
 app.use('/api/generate', require('./routes/generate'));
 app.use('/api/paper',    require('./routes/paper'));
 app.use('/api/usage',    require('./routes/usage'));
 
-// ── HEALTH CHECK ──────────────────────────────
+// Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.0.0' });
 });
