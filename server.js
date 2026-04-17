@@ -6,10 +6,13 @@ require('dotenv').config();
 
 const app = express();
 
-// ── SECURITY HEADERS ──────────────────────
+// ── TRUST RAILWAY'S PROXY ─────────────────────
+app.set('trust proxy', 1);
+
+// ── SECURITY HEADERS ──────────────────────────
 app.use(helmet({ crossOriginResourcePolicy: false }));
 
-// ── CORS — open during setup, restrict later ──
+// ── CORS ──────────────────────────────────────
 app.use(cors({
   origin: '*',
   methods: ['POST', 'GET', 'OPTIONS'],
@@ -18,7 +21,7 @@ app.use(cors({
 
 app.use(express.json({ limit: '10kb' }));
 
-// ── GLOBAL RATE LIMIT ────────────────────
+// ── RATE LIMITING ─────────────────────────────
 const globalLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 50,
@@ -28,18 +31,14 @@ const globalLimiter = rateLimit({
 });
 app.use('/api/', globalLimiter);
 
-// ── ROUTES ──────────────────────────────
+// ── ROUTES ────────────────────────────────────
 app.use('/api/generate', require('./routes/generate'));
 app.use('/api/paper',    require('./routes/paper'));
 app.use('/api/usage',    require('./routes/usage'));
 
-// ── HEALTH CHECK ─────────────────────────
+// ── HEALTH CHECK ──────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    version: '1.0.0',
-  });
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.0.0' });
 });
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
