@@ -334,6 +334,31 @@ app.get('/api/admin/teachers', (req, res) => {
   res.json({ success: true, teachers, totalTeachers: teachers.length });
 });
 
+// POST /api/admin/teacher/create — admin creates teacher with auto-generated password
+app.post('/api/admin/teacher/create', (req, res) => {
+  if (req.headers['x-admin-secret'] !== process.env.ADMIN_SECRET)
+    return res.status(401).json({ error: 'Unauthorized' });
+  const { name, subjects, examMode } = req.body;
+  if (!name || !subjects || !Array.isArray(subjects) || subjects.length === 0)
+    return res.status(400).json({ error: 'Name and at least one subject required.' });
+  const teacherCode = genCode(6);
+  const teacherKey  = genCode(12);
+  const password    = genCode(8); // auto-generated, shown once to admin
+  const { hash, salt } = hashPass(password);
+  teacherStore[teacherCode] = {
+    name: name.slice(0, 60),
+    passwordHash: hash,
+    passwordSalt: salt,
+    subjects: subjects.slice(0, 8),
+    examMode: examMode || 'cbse12',
+    teacherKey,
+    createdAt: new Date().toISOString(),
+    students: {}
+  };
+  console.log(`[ADMIN] Created teacher: ${name} → Code: ${teacherCode}`);
+  res.json({ success: true, teacherCode, password, name: teacherStore[teacherCode].name });
+});
+
 // DELETE /api/admin/teacher/:code
 app.delete('/api/admin/teacher/:code', (req, res) => {
   if (req.headers['x-admin-secret'] !== process.env.ADMIN_SECRET)
