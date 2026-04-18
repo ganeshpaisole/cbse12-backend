@@ -308,6 +308,43 @@ app.get('/api/usage', (req, res) => {
   res.json({ status: 'ok', teacherCount: Object.keys(teacherStore).length });
 });
 
+/* ── ADMIN AUTH & MANAGEMENT ──────────────── */
+
+// POST /api/auth/admin/login
+app.post('/api/auth/admin/login', (req, res) => {
+  const { password } = req.body;
+  if (!password) return res.status(400).json({ error: 'Password required.' });
+  if (!process.env.ADMIN_SECRET || password !== process.env.ADMIN_SECRET)
+    return res.status(401).json({ error: 'Invalid admin password.' });
+  res.json({ success: true, role: 'admin' });
+});
+
+// GET /api/admin/teachers — list all teachers
+app.get('/api/admin/teachers', (req, res) => {
+  if (req.headers['x-admin-secret'] !== process.env.ADMIN_SECRET)
+    return res.status(401).json({ error: 'Unauthorized' });
+  const teachers = Object.entries(teacherStore).map(([code, t]) => ({
+    teacherCode: code,
+    name: t.name,
+    subjects: t.subjects,
+    examMode: t.examMode,
+    createdAt: t.createdAt,
+    studentCount: Object.keys(t.students).length
+  }));
+  res.json({ success: true, teachers, totalTeachers: teachers.length });
+});
+
+// DELETE /api/admin/teacher/:code
+app.delete('/api/admin/teacher/:code', (req, res) => {
+  if (req.headers['x-admin-secret'] !== process.env.ADMIN_SECRET)
+    return res.status(401).json({ error: 'Unauthorized' });
+  const code = req.params.code.toUpperCase();
+  if (!teacherStore[code]) return res.status(404).json({ error: 'Teacher not found.' });
+  delete teacherStore[code];
+  console.log(`[ADMIN] Deleted teacher: ${code}`);
+  res.json({ success: true, message: `Teacher ${code} deleted.` });
+});
+
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 app.use((err, req, res, next) => {
   console.error('[ERROR]', err.message);
