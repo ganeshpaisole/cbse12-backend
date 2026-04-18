@@ -1,5 +1,6 @@
 const express = require('express');
 const Anthropic = require('@anthropic-ai/sdk');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
@@ -10,7 +11,7 @@ app.use(express.json({ limit: '20kb' }));
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-teacher-key');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
@@ -20,13 +21,197 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Generate questions
+/* ══════════════════════════════════════════════
+   PASSWORD HASHING (built-in crypto, no bcrypt)
+══════════════════════════════════════════════ */
+function hashPass(password, salt = crypto.randomBytes(16).toString('hex')) {
+  const hash = crypto.createHmac('sha256', salt).update(password).digest('hex');
+  return { hash, salt };
+}
+function verifyPass(password, salt, storedHash) {
+  return hashPass(password, salt).hash === storedHash;
+}
+
+/* ══════════════════════════════════════════════
+   CODE GENERATOR
+══════════════════════════════════════════════ */
+function genCode(n = 6) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i < n; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+function genDigits(n = 4) {
+  let s = '';
+  for (let i = 0; i < n; i++) s += Math.floor(Math.random() * 10);
+  return s;
+}
+
+/* ══════════════════════════════════════════════
+   IN-MEMORY STORE (resets on restart — MVP)
+   teacherStore[teacherCode] = {
+     name, passwordHash, passwordSalt, subjects[], examMode,
+     teacherKey (for legacy class endpoint compat),
+     createdAt,
+     students: {
+       studentCode: { name, passwordHash, passwordSalt, joinedAt, progress[] }
+     }
+   }
+══════════════════════════════════════════════ */
+const teacherStore = {};
+
+/* ── TEACHER AUTH ─────────────────────────── */
+
+// POST /api/auth/teacher/register
+app.post('/api/auth/teacher/register', (req, res) => {
+  const { name, password, subjects, examMode } = req.body;
+  if (!name || !password || !subjects || !Array.isArray(subjects) || subjects.length === 0)
+    return res.status(400).json({ error: 'Name, password and at least one subject are required.' });
+  if (password.length < 4)
+    return res.status(400).json({ error: 'Password must be at least 4 characters.' });
+
+  const teacherCode = genCode(6);
+  const teacherKey  = genCode(12);
+  const { hash, salt } = hashPass(password);
+
+  teacherStore[teacherCode] = {
+    name: name.slice(0, 60),
+    passwordHash: hash,
+    passwordSalt: salt,
+    subjects: subjects.slice(0, 8),
+    examMode: examMode || 'cbse12',
+    teacherKey,
+    createdAt: new Date().toISOString(),
+    students: {}
+  };
+
+  console.log(`[TEACHER] Registered: ${name} → Code: ${teacherCode}`);
+  res.json({ success: true, teacherCode, teacherKey, name: teacherStore[teacherCode].name });
+});
+
+// POST /api/auth/teacher/login
+app.post('/api/auth/teacher/login', (req, res) => {
+  const { teacherCode, password } = req.body;
+  if (!teacherCode || !password)
+    return res.status(400).json({ error: 'Teacher code and password required.' });
+
+  const code = teacherCode.toString().toUpperCase().trim();
+  const t = teacherStore[code];
+  if (!t) return res.status(404).json({ error: 'Teacher code not found.' });
+  if (!verifyPass(password, t.passwordSalt, t.passwordHash))
+    return res.status(401).json({ error: 'Incorrect password.' });
+
+  res.json({
+    success: true,
+    teacherCode: code,
+    teacherKey: t.teacherKey,
+    name: t.name,
+    subjects: t.subjects,
+    examMode: t.examMode,
+    studentCount: Object.keys(t.students).length
+  });
+});
+
+// POST /api/teacher/student/invite  — teacher creates a student slot
+app.post('/api/teacher/student/invite', (req, res) => {
+  const { teacherCode, teacherKey, studentName } = req.body;
+  if (!teacherCode || !teacherKey || !studentName)
+    return res.status(400).json({ error: 'teacherCode, teacherKey and studentName required.' });
+
+  const code = teacherCode.toString().toUpperCase().trim();
+  const t = teacherStore[code];
+  if (!t) return res.status(404).json({ error: 'Teacher not found.' });
+  if (t.teacherKey !== teacherKey) return res.status(401).json({ error: 'Invalid teacher key.' });
+
+  const studentCode     = genCode(4);
+  const studentPassword = genDigits(4);
+  const { hash, salt }  = hashPass(studentPassword);
+
+  t.students[studentCode] = {
+    name: studentName.slice(0, 60),
+    passwordHash: hash,
+    passwordSalt: salt,
+    joinedAt: new Date().toISOString(),
+    progress: []
+  };
+
+  res.json({ success: true, studentCode, studentPassword, studentName: t.students[studentCode].name });
+});
+
+// POST /api/auth/student/login
+app.post('/api/auth/student/login', (req, res) => {
+  const { teacherCode, studentCode, studentPassword } = req.body;
+  if (!teacherCode || !studentCode || !studentPassword)
+    return res.status(400).json({ error: 'Teacher code, student code and password required.' });
+
+  const tc = teacherCode.toString().toUpperCase().trim();
+  const sc = studentCode.toString().toUpperCase().trim();
+  const t  = teacherStore[tc];
+  if (!t) return res.status(404).json({ error: 'Teacher code not found.' });
+
+  const s = t.students[sc];
+  if (!s) return res.status(404).json({ error: 'Student code not found.' });
+  if (!verifyPass(studentPassword, s.passwordSalt, s.passwordHash))
+    return res.status(401).json({ error: 'Incorrect student password.' });
+
+  res.json({
+    success: true,
+    teacherCode: tc,
+    studentCode: sc,
+    studentName: s.name,
+    teacherName: t.name,
+    subjects: t.subjects,
+    examMode: t.examMode
+  });
+});
+
+/* ── STUDENT PROGRESS SYNC ────────────────── */
+
+// POST /api/student/sync
+app.post('/api/student/sync', (req, res) => {
+  const { teacherCode, studentCode, subject, chapter, type, scoreC, scoreW, scoreTot } = req.body;
+  if (!teacherCode || !studentCode)
+    return res.status(400).json({ error: 'teacherCode and studentCode required.' });
+
+  const tc = teacherCode.toString().toUpperCase().trim();
+  const sc = studentCode.toString().toUpperCase().trim();
+  const t  = teacherStore[tc];
+  if (!t || !t.students[sc]) return res.status(404).json({ error: 'Student not found.' });
+
+  const pct = scoreTot > 0 ? Math.round((scoreC / scoreTot) * 100) : 0;
+  t.students[sc].progress.push({ subject, chapter, type, scoreC, scoreW, scoreTot, pct, timestamp: new Date().toISOString() });
+  if (t.students[sc].progress.length > 100) t.students[sc].progress.splice(0, 50);
+  res.json({ success: true });
+});
+
+/* ── TEACHER DASHBOARD ───────────────────── */
+
+// GET /api/class/:teacherCode  — teacher views all students
+app.get('/api/class/:teacherCode', (req, res) => {
+  const code = req.params.teacherCode.toUpperCase();
+  const t    = teacherStore[code];
+  if (!t) return res.status(404).json({ error: 'Teacher not found.' });
+  if (req.headers['x-teacher-key'] !== t.teacherKey)
+    return res.status(401).json({ error: 'Invalid teacher key.' });
+
+  const students = Object.entries(t.students).map(([sc, s]) => {
+    const avg = s.progress.length > 0
+      ? Math.round(s.progress.reduce((a, p) => a + p.pct, 0) / s.progress.length)
+      : null;
+    return { studentCode: sc, name: s.name, joinedAt: s.joinedAt, totalQuizzes: s.progress.length, avgScore: avg, recentProgress: s.progress.slice(-10) };
+  });
+
+  res.json({ success: true, teacherCode: code, teacherName: t.name, subjects: t.subjects, examMode: t.examMode, students });
+});
+
+/* ══════════════════════════════════════════════
+   AI — GENERATE QUESTIONS
+══════════════════════════════════════════════ */
 app.post('/api/generate', async (req, res) => {
   try {
     const { subject, chapters, type, count, difficulty, examMode } = req.body;
-    if (!subject || !chapters || !type) {
+    if (!subject || !chapters || !type)
       return res.status(400).json({ error: 'Missing required fields' });
-    }
 
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -40,21 +225,21 @@ For fill: {"type":"fill","questions":[{"q":"sentence with ___","answer":"...","h
 For assertion: {"type":"assertion","questions":[{"assertion":"...","reason":"...","correct":0,"exp":"..."}]}`;
 
     const examCtx = {
-      cbse12: 'CBSE Class 12 board exam. NCERT-based. No negative marking.',
+      cbse12:   'CBSE Class 12 board exam. NCERT-based. No negative marking.',
       jee_main: 'JEE Main. Single correct +4/-1. Include numericals. Moderate to hard.',
-      jee_adv: 'JEE Advanced. Multiple correct possible. Hardest difficulty beyond NCERT.',
-      neet: 'NEET UG. NCERT Biology word-level accuracy. MCQ +4/-1.',
-      mht_cet: 'MHT-CET Maharashtra. MCQ +2/0 no negative marking.',
-      cuet: 'CUET UG. NCERT Class 12. MCQ +5/-1.',
-      bitsat: 'BITSAT. Speed-oriented. MCQ -1 wrong.',
-      iiser: 'IISER IAT. All 4 subjects equally. MCQ +4/-1.',
+      jee_adv:  'JEE Advanced. Multiple correct possible. Hardest difficulty beyond NCERT.',
+      neet:     'NEET UG. NCERT Biology word-level accuracy. MCQ +4/-1.',
+      mht_cet:  'MHT-CET Maharashtra. MCQ +2/0 no negative. Maharashtra State Board (Balbharati) syllabus — Class 11 (20%) + Class 12 (80%). Maharashtra HSC level.',
+      cuet:     'CUET UG. NCERT Class 12. MCQ +5/-1.',
+      bitsat:   'BITSAT. Speed-oriented. MCQ -1 wrong.',
+      iiser:    'IISER IAT. All 4 subjects equally. MCQ +4/-1.',
     }[examMode] || 'CBSE Class 12 board exam.';
 
-    const usr = `Generate ${count || 5} ${type} questions for CBSE Grade 12 ${subject}.
+    const usr = `Generate ${count || 5} ${type} questions for ${subject}.
 Coverage: ${Array.isArray(chapters) ? chapters.join(', ') : chapters}
 Difficulty: ${difficulty || 'Mixed'}
 Exam context: ${examCtx}
-Board exam style. Include NCERT references in explanations.`;
+Board exam style. Include source references in explanations.`;
 
     const message = await client.messages.create({
       model: 'claude-sonnet-4-20250514',
@@ -64,7 +249,7 @@ Board exam style. Include NCERT references in explanations.`;
     });
 
     let raw = message.content[0].text.trim()
-      .replace(/^```json\s*/,'').replace(/^```\s*/,'').replace(/\s*```$/,'').trim();
+      .replace(/^```json\s*/, '').replace(/^```\s*/, '').replace(/\s*```$/, '').trim();
 
     const data = JSON.parse(raw);
     res.json({ success: true, data });
@@ -76,7 +261,9 @@ Board exam style. Include NCERT references in explanations.`;
   }
 });
 
-// Generate paper
+/* ══════════════════════════════════════════════
+   AI — GENERATE PAPER
+══════════════════════════════════════════════ */
 app.post('/api/paper', async (req, res) => {
   try {
     const { subject, chapters, duration, totalMarks, difficulty, includeChoice, source, examMode, teacherNote, sections } = req.body;
@@ -88,13 +275,13 @@ app.post('/api/paper', async (req, res) => {
     const sys = `You are a CBSE Grade 12 exam paper setter. Return ONLY valid JSON, no markdown.
 Schema: {"paperTitle":"string","examDate":"string","totalMarks":number,"duration":"string","generalInstructions":["string"],"sections":[{"sectionName":"string","sectionDesc":"string","totalMarks":number,"qType":"mcq|vsa|sa|la|casebased","questions":[{"qNum":number,"qText":"string","marks":number,"opts":["(a)..."],"answerKey":"string","answerExplanation":"string"}]}]}`;
 
-    const usr = `Generate a CBSE board exam paper for Grade 12 ${subject}.
+    const usr = `Generate a board exam paper for Grade 12 ${subject}.
 Coverage: ${Array.isArray(chapters) ? chapters.join(', ') : (chapters || 'Full syllabus')}
 Duration: ${duration || '3 hours'}, Total: ${cappedMarks} marks, Difficulty: ${difficulty || 'Mixed'}
 ${includeChoice ? 'Include internal choice (OR) in SA and LA questions.' : ''}
-${sections ? 'Sections: ' + JSON.stringify(sections) : 'Use standard CBSE pattern'}
-${teacherNote ? 'Note: ' + String(teacherNote).slice(0,200) : ''}
-Include 5 CBSE-style general instructions. Date: March 2027. Full answer key.`;
+${sections ? 'Sections: ' + JSON.stringify(sections) : 'Use standard board exam pattern'}
+${teacherNote ? 'Note: ' + String(teacherNote).slice(0, 200) : ''}
+Include 5 general instructions. Date: March 2027. Full answer key.`;
 
     const message = await client.messages.create({
       model: 'claude-sonnet-4-20250514',
@@ -104,7 +291,7 @@ Include 5 CBSE-style general instructions. Date: March 2027. Full answer key.`;
     });
 
     let raw = message.content[0].text.trim()
-      .replace(/^```json\s*/,'').replace(/^```\s*/,'').replace(/\s*```$/,'').trim();
+      .replace(/^```json\s*/, '').replace(/^```\s*/, '').replace(/\s*```$/, '').trim();
     const paper = JSON.parse(raw);
     res.json({ success: true, data: paper });
 
@@ -114,74 +301,11 @@ Include 5 CBSE-style general instructions. Date: March 2027. Full answer key.`;
   }
 });
 
-/* ══════════════════════════════════════════════
-   TEACHER-STUDENT CLASS SYSTEM
-   In-memory store (resets on restart — MVP)
-══════════════════════════════════════════════ */
-const classStore = {};
-// {classCode: {teacherName, teacherKey, createdAt, students: {}}}
-// students: {studentId: {name, joinedAt, progress: []}}
-
-function genCode(n = 6) {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let s = '';
-  for (let i = 0; i < n; i++) s += chars[Math.floor(Math.random() * chars.length)];
-  return s;
-}
-
-// Create a class (teacher)
-app.post('/api/class/create', (req, res) => {
-  const { teacherName } = req.body;
-  if (!teacherName || typeof teacherName !== 'string') return res.status(400).json({ error: 'Teacher name required' });
-  const classCode = genCode(6);
-  const teacherKey = genCode(10);
-  classStore[classCode] = { teacherName: teacherName.slice(0, 60), teacherKey, createdAt: new Date().toISOString(), students: {} };
-  res.json({ success: true, classCode, teacherKey, teacherName: classStore[classCode].teacherName });
-});
-
-// Student joins a class
-app.post('/api/class/join', (req, res) => {
-  const { classCode, studentName } = req.body;
-  if (!classCode || !studentName) return res.status(400).json({ error: 'Class code and student name required' });
-  const code = classCode.toString().toUpperCase().trim();
-  const cls = classStore[code];
-  if (!cls) return res.status(404).json({ error: 'Class not found. Check the code with your teacher.' });
-  const studentId = genCode(10);
-  cls.students[studentId] = { name: studentName.toString().slice(0, 60), joinedAt: new Date().toISOString(), progress: [] };
-  res.json({ success: true, studentId, classCode: code, teacherName: cls.teacherName });
-});
-
-// Student syncs quiz progress
-app.post('/api/student/sync', (req, res) => {
-  const { studentId, classCode, subject, chapter, type, scoreC, scoreW, scoreTot } = req.body;
-  if (!studentId || !classCode) return res.status(400).json({ error: 'Missing studentId or classCode' });
-  const code = classCode.toString().toUpperCase().trim();
-  const cls = classStore[code];
-  if (!cls || !cls.students[studentId]) return res.status(404).json({ error: 'Student not found' });
-  const pct = scoreTot > 0 ? Math.round((scoreC / scoreTot) * 100) : 0;
-  cls.students[studentId].progress.push({ subject, chapter, type, scoreC, scoreW, scoreTot, pct, timestamp: new Date().toISOString() });
-  if (cls.students[studentId].progress.length > 100) cls.students[studentId].progress.splice(0, 50);
-  res.json({ success: true });
-});
-
-// Teacher views class dashboard
-app.get('/api/class/:code', (req, res) => {
-  const code = req.params.code.toUpperCase();
-  const cls = classStore[code];
-  if (!cls) return res.status(404).json({ error: 'Class not found' });
-  if (req.headers['x-teacher-key'] !== cls.teacherKey) return res.status(401).json({ error: 'Invalid teacher key' });
-  const students = Object.entries(cls.students).map(([id, s]) => {
-    const avg = s.progress.length > 0 ? Math.round(s.progress.reduce((a, p) => a + p.pct, 0) / s.progress.length) : null;
-    return { id, name: s.name, joinedAt: s.joinedAt, totalQuizzes: s.progress.length, avgScore: avg, recentProgress: s.progress.slice(-10) };
-  });
-  res.json({ success: true, classCode: code, teacherName: cls.teacherName, students });
-});
-
-// Usage stats (admin only)
+// Usage stats (admin)
 app.get('/api/usage', (req, res) => {
   const secret = req.headers['x-admin-secret'];
   if (secret !== process.env.ADMIN_SECRET) return res.status(401).json({ error: 'Unauthorized' });
-  res.json({ status: 'ok', message: 'Usage tracking not configured' });
+  res.json({ status: 'ok', teacherCount: Object.keys(teacherStore).length });
 });
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
