@@ -114,6 +114,69 @@ Include 5 CBSE-style general instructions. Date: March 2027. Full answer key.`;
   }
 });
 
+/* ══════════════════════════════════════════════
+   TEACHER-STUDENT CLASS SYSTEM
+   In-memory store (resets on restart — MVP)
+══════════════════════════════════════════════ */
+const classStore = {};
+// {classCode: {teacherName, teacherKey, createdAt, students: {}}}
+// students: {studentId: {name, joinedAt, progress: []}}
+
+function genCode(n = 6) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i < n; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+
+// Create a class (teacher)
+app.post('/api/class/create', (req, res) => {
+  const { teacherName } = req.body;
+  if (!teacherName || typeof teacherName !== 'string') return res.status(400).json({ error: 'Teacher name required' });
+  const classCode = genCode(6);
+  const teacherKey = genCode(10);
+  classStore[classCode] = { teacherName: teacherName.slice(0, 60), teacherKey, createdAt: new Date().toISOString(), students: {} };
+  res.json({ success: true, classCode, teacherKey, teacherName: classStore[classCode].teacherName });
+});
+
+// Student joins a class
+app.post('/api/class/join', (req, res) => {
+  const { classCode, studentName } = req.body;
+  if (!classCode || !studentName) return res.status(400).json({ error: 'Class code and student name required' });
+  const code = classCode.toString().toUpperCase().trim();
+  const cls = classStore[code];
+  if (!cls) return res.status(404).json({ error: 'Class not found. Check the code with your teacher.' });
+  const studentId = genCode(10);
+  cls.students[studentId] = { name: studentName.toString().slice(0, 60), joinedAt: new Date().toISOString(), progress: [] };
+  res.json({ success: true, studentId, classCode: code, teacherName: cls.teacherName });
+});
+
+// Student syncs quiz progress
+app.post('/api/student/sync', (req, res) => {
+  const { studentId, classCode, subject, chapter, type, scoreC, scoreW, scoreTot } = req.body;
+  if (!studentId || !classCode) return res.status(400).json({ error: 'Missing studentId or classCode' });
+  const code = classCode.toString().toUpperCase().trim();
+  const cls = classStore[code];
+  if (!cls || !cls.students[studentId]) return res.status(404).json({ error: 'Student not found' });
+  const pct = scoreTot > 0 ? Math.round((scoreC / scoreTot) * 100) : 0;
+  cls.students[studentId].progress.push({ subject, chapter, type, scoreC, scoreW, scoreTot, pct, timestamp: new Date().toISOString() });
+  if (cls.students[studentId].progress.length > 100) cls.students[studentId].progress.splice(0, 50);
+  res.json({ success: true });
+});
+
+// Teacher views class dashboard
+app.get('/api/class/:code', (req, res) => {
+  const code = req.params.code.toUpperCase();
+  const cls = classStore[code];
+  if (!cls) return res.status(404).json({ error: 'Class not found' });
+  if (req.headers['x-teacher-key'] !== cls.teacherKey) return res.status(401).json({ error: 'Invalid teacher key' });
+  const students = Object.entries(cls.students).map(([id, s]) => {
+    const avg = s.progress.length > 0 ? Math.round(s.progress.reduce((a, p) => a + p.pct, 0) / s.progress.length) : null;
+    return { id, name: s.name, joinedAt: s.joinedAt, totalQuizzes: s.progress.length, avgScore: avg, recentProgress: s.progress.slice(-10) };
+  });
+  res.json({ success: true, classCode: code, teacherName: cls.teacherName, students });
+});
+
 // Usage stats (admin only)
 app.get('/api/usage', (req, res) => {
   const secret = req.headers['x-admin-secret'];
