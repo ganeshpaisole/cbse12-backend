@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git push:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(node:*)",
+      "Bash(python:*)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(curl -s http://localhost:3001/health)",
+      "Bash(curl -s http://localhost:5173)",
+      "Bash(curl *)",
+      "Bash(npx vite *)",
+      "Bash(netstat -ano)",
+      "Bash(awk '{print $5}')",
+      "Bash(xargs -I{} taskkill /PID {} /F)",
+      "Bash(findstr :3001)",
+      "Bash(taskkill /PID 20424 /F)"
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "EduPulse — Smart Exam Prep",
+  "short_name": "EduPulse",
+  "description": "AI-powered exam preparation for CBSE, JEE, NEET and more",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#07071a",
+  "theme_color": "#7c3aed",
+  "categories": ["education"],
+  "icons": [
+    { "src": "/icons/icon-192.svg", "sizes": "192x192", "type": "image/svg+xml", "purpose": "any maskable" },
+    { "src": "/icons/icon-512.svg", "sizes": "512x512", "type": "image/svg+xml", "purpose": "any maskable" },
+    { "src": "/favicon.svg",        "sizes": "any",     "type": "image/svg+xml" }
+  ],
+  "screenshots": [],
+  "shortcuts": [
+    { "name": "Teacher Login",  "url": "/login", "description": "Login as teacher" },
+    { "name": "Student Login",  "url": "/login", "description": "Login as student" }
+  ]
+}

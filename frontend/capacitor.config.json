@@ -1,0 +1,20 @@
+{
+  "appId": "com.edupulse.app",
+  "appName": "EduPulse",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 2000,
+      "backgroundColor": "#07071a",
+      "androidSplashResourceName": "splash",
+      "showSpinner": false
+    },
+    "StatusBar": {
+      "style": "Dark",
+      "backgroundColor": "#07071a"
+    }
+  }
+}

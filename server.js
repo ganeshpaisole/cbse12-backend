@@ -59,12 +59,13 @@ function genDigits(n = 4) {
    }
 ══════════════════════════════════════════════ */
 const teacherStore = {};
+const assignedQuizzes = {};
 
 /* ── TEACHER AUTH ─────────────────────────── */
 
 // POST /api/auth/teacher/register
 app.post('/api/auth/teacher/register', (req, res) => {
-  const { name, password, subjects, examMode } = req.body;
+  const { name, password, subjects, examMode, examModes } = req.body;
   if (!name || !password || !subjects || !Array.isArray(subjects) || subjects.length === 0)
     return res.status(400).json({ error: 'Name, password and at least one subject are required.' });
   if (password.length < 4)
@@ -73,14 +74,17 @@ app.post('/api/auth/teacher/register', (req, res) => {
   const teacherCode = genCode(6);
   const teacherKey  = genCode(12);
   const { hash, salt } = hashPass(password);
+  const modes = Array.isArray(examModes) && examModes.length > 0 ? examModes : [examMode || 'cbse12'];
 
   teacherStore[teacherCode] = {
     name: name.slice(0, 60),
     passwordHash: hash,
     passwordSalt: salt,
     subjects: subjects.slice(0, 8),
-    examMode: examMode || 'cbse12',
+    examModes: modes,
+    examMode: modes[0],
     teacherKey,
+    suspended: false,
     createdAt: new Date().toISOString(),
     students: {}
   };
@@ -98,6 +102,7 @@ app.post('/api/auth/teacher/login', (req, res) => {
   const code = teacherCode.toString().toUpperCase().trim();
   const t = teacherStore[code];
   if (!t) return res.status(404).json({ error: 'Teacher code not found.' });
+  if (t.suspended) return res.status(403).json({ error: 'Your account has been suspended. Contact the administrator.' });
   if (!verifyPass(password, t.passwordSalt, t.passwordHash))
     return res.status(401).json({ error: 'Incorrect password.' });
 
@@ -107,6 +112,7 @@ app.post('/api/auth/teacher/login', (req, res) => {
     teacherKey: t.teacherKey,
     name: t.name,
     subjects: t.subjects,
+    examModes: t.examModes || [t.examMode || 'cbse12'],
     examMode: t.examMode,
     studentCount: Object.keys(t.students).length
   });
@@ -138,21 +144,32 @@ app.post('/api/teacher/student/invite', (req, res) => {
   res.json({ success: true, studentCode, studentPassword, studentName: t.students[studentCode].name });
 });
 
-// POST /api/auth/student/login
+// POST /api/auth/student/login  — accepts studentCode OR studentName
 app.post('/api/auth/student/login', (req, res) => {
-  const { teacherCode, studentCode, studentPassword } = req.body;
-  if (!teacherCode || !studentCode || !studentPassword)
-    return res.status(400).json({ error: 'Teacher code, student code and password required.' });
+  const { teacherCode, studentCode, studentName, studentPassword } = req.body;
+  if (!teacherCode || !studentPassword || (!studentCode && !studentName))
+    return res.status(400).json({ error: 'Teacher code, student identifier and password required.' });
 
   const tc = teacherCode.toString().toUpperCase().trim();
-  const sc = studentCode.toString().toUpperCase().trim();
   const t  = teacherStore[tc];
   if (!t) return res.status(404).json({ error: 'Teacher code not found.' });
 
-  const s = t.students[sc];
-  if (!s) return res.status(404).json({ error: 'Student code not found.' });
+  // Look up by code OR by name (case-insensitive)
+  let sc, s;
+  if (studentCode) {
+    sc = studentCode.toString().toUpperCase().trim();
+    s  = t.students[sc];
+    if (!s) return res.status(404).json({ error: 'Student code not found.' });
+  } else {
+    const nameLower = studentName.toString().trim().toLowerCase();
+    const match = Object.entries(t.students).find(([, stu]) => stu.name.toLowerCase() === nameLower);
+    if (!match) return res.status(404).json({ error: 'Student name not found in this class.' });
+    [sc, s] = match;
+  }
+
+  if (s.suspended) return res.status(403).json({ error: 'Your account has been suspended. Contact your teacher.' });
   if (!verifyPass(studentPassword, s.passwordSalt, s.passwordHash))
-    return res.status(401).json({ error: 'Incorrect student password.' });
+    return res.status(401).json({ error: 'Incorrect PIN / password.' });
 
   res.json({
     success: true,
@@ -184,6 +201,114 @@ app.post('/api/student/sync', (req, res) => {
   res.json({ success: true });
 });
 
+/* ── ASSIGNED QUIZZES ────────────────────── */
+
+// POST /api/teacher/quiz/assign  — teacher sends quiz to class
+app.post('/api/teacher/quiz/assign', (req, res) => {
+  const { teacherCode, teacherKey, questions, subject, type, chapters } = req.body;
+  if (!teacherCode || !teacherKey || !questions || !Array.isArray(questions))
+    return res.status(400).json({ error: 'teacherCode, teacherKey and questions required.' });
+
+  const tc = teacherCode.toString().toUpperCase().trim();
+  const t  = teacherStore[tc];
+  if (!t) return res.status(404).json({ error: 'Teacher not found.' });
+  if (t.teacherKey !== teacherKey) return res.status(401).json({ error: 'Invalid teacher key.' });
+
+  const quizId = genCode(8);
+  assignedQuizzes[quizId] = {
+    teacherCode: tc,
+    subject:     subject || '',
+    type:        type    || 'mcq',
+    chapters:    Array.isArray(chapters) ? chapters : [],
+    questions,
+    createdAt:   new Date().toISOString(),
+    active:      true,
+    submissions: {},
+  };
+  t.activeQuizId = quizId;
+
+  console.log(`[QUIZ] Assigned: ${tc} → ${quizId} (${questions.length} Qs, ${subject})`);
+  res.json({ success: true, quizId, questionCount: questions.length });
+});
+
+// GET /api/student/quiz/active?teacherCode=XX  — student checks for assigned quiz
+app.get('/api/student/quiz/active', (req, res) => {
+  const tc = (req.query.teacherCode || '').toUpperCase().trim();
+  const t  = teacherStore[tc];
+  if (!t || !t.activeQuizId) return res.json({ success: true, quiz: null });
+
+  const quiz = assignedQuizzes[t.activeQuizId];
+  if (!quiz || !quiz.active) return res.json({ success: true, quiz: null });
+
+  // Strip all answer fields before sending to student
+  const safeQuestions = quiz.questions.map(q => ({
+    question:  q.question  || q.q  || '',
+    options:   q.options   || q.opts || [],
+    sentence:  q.sentence  || q.q  || '',
+    assertion: q.assertion || '',
+    reason:    q.reason    || '',
+    marks:     q.marks,
+    hint:      q.hint,
+    name:      q.name,
+    formula:   q.formula,
+    variables: q.variables,
+    usage:     q.usage,
+  }));
+
+  res.json({
+    success: true,
+    quiz: {
+      quizId:        t.activeQuizId,
+      subject:       quiz.subject,
+      type:          quiz.type,
+      chapters:      quiz.chapters,
+      questions:     safeQuestions,
+      questionCount: quiz.questions.length,
+    },
+  });
+});
+
+// POST /api/student/quiz/submit  — student submits, gets score
+app.post('/api/student/quiz/submit', (req, res) => {
+  const { teacherCode, studentCode, quizId, answers } = req.body;
+  if (!teacherCode || !studentCode || !quizId || !answers)
+    return res.status(400).json({ error: 'teacherCode, studentCode, quizId and answers required.' });
+
+  const tc = teacherCode.toString().toUpperCase().trim();
+  const sc = studentCode.toString().toUpperCase().trim();
+  const t  = teacherStore[tc];
+  if (!t || !t.students[sc]) return res.status(404).json({ error: 'Student not found.' });
+
+  const quiz = assignedQuizzes[quizId];
+  if (!quiz) return res.status(404).json({ error: 'Quiz not found.' });
+
+  let correct = 0, wrong = 0;
+  const total = quiz.questions.length;
+
+  quiz.questions.forEach((q, i) => {
+    const ans = answers[i];
+    if (ans === undefined || ans === null) return;
+    if (quiz.type === 'mcq') {
+      const correctIdx = q.correct ?? q.c ?? -1;
+      if (ans === correctIdx) correct++; else wrong++;
+    } else {
+      correct++; // non-MCQ: showing answer = reviewed = credit
+    }
+  });
+
+  const pct = total > 0 ? Math.round((correct / total) * 100) : 0;
+  const record = {
+    subject: quiz.subject, chapter: quiz.chapters.join(', ') || 'Mixed',
+    type: quiz.type, scoreC: correct, scoreW: wrong, scoreTot: total,
+    pct, timestamp: new Date().toISOString(), assigned: true,
+  };
+  t.students[sc].progress.push(record);
+  if (t.students[sc].progress.length > 100) t.students[sc].progress.splice(0, 50);
+  quiz.submissions[sc] = { correct, wrong, total, pct, submittedAt: new Date().toISOString() };
+
+  res.json({ success: true, correct, wrong, total, pct });
+});
+
 /* ── TEACHER DASHBOARD ───────────────────── */
 
 // GET /api/class/:teacherCode  — teacher views all students
@@ -198,10 +323,10 @@ app.get('/api/class/:teacherCode', (req, res) => {
     const avg = s.progress.length > 0
       ? Math.round(s.progress.reduce((a, p) => a + p.pct, 0) / s.progress.length)
       : null;
-    return { studentCode: sc, name: s.name, joinedAt: s.joinedAt, totalQuizzes: s.progress.length, avgScore: avg, recentProgress: s.progress.slice(-10) };
+    return { studentCode: sc, name: s.name, joinedAt: s.joinedAt, totalQuizzes: s.progress.length, avgScore: avg, recentProgress: s.progress.slice(-10), suspended: s.suspended || false };
   });
 
-  res.json({ success: true, teacherCode: code, teacherName: t.name, subjects: t.subjects, examMode: t.examMode, students });
+  res.json({ success: true, teacherCode: code, teacherName: t.name, subjects: t.subjects, examModes: t.examModes || [t.examMode], examMode: t.examMode, students });
 });
 
 /* ══════════════════════════════════════════════
@@ -319,7 +444,35 @@ app.post('/api/auth/admin/login', (req, res) => {
   res.json({ success: true, role: 'admin' });
 });
 
-// GET /api/admin/teachers — list all teachers
+/* ── TEACHER — STUDENT MANAGEMENT ────────── */
+
+// DELETE /api/teacher/student/:studentCode
+app.delete('/api/teacher/student/:studentCode', (req, res) => {
+  const { teacherCode, teacherKey } = req.body;
+  const tc = (teacherCode || '').toUpperCase().trim();
+  const sc = req.params.studentCode.toUpperCase();
+  const t  = teacherStore[tc];
+  if (!t) return res.status(404).json({ error: 'Teacher not found.' });
+  if (t.teacherKey !== teacherKey) return res.status(401).json({ error: 'Invalid teacher key.' });
+  if (!t.students[sc]) return res.status(404).json({ error: 'Student not found.' });
+  delete t.students[sc];
+  res.json({ success: true });
+});
+
+// PATCH /api/teacher/student/:studentCode/status  — suspend or reactivate
+app.patch('/api/teacher/student/:studentCode/status', (req, res) => {
+  const { teacherCode, teacherKey, suspended } = req.body;
+  const tc = (teacherCode || '').toUpperCase().trim();
+  const sc = req.params.studentCode.toUpperCase();
+  const t  = teacherStore[tc];
+  if (!t) return res.status(404).json({ error: 'Teacher not found.' });
+  if (t.teacherKey !== teacherKey) return res.status(401).json({ error: 'Invalid teacher key.' });
+  if (!t.students[sc]) return res.status(404).json({ error: 'Student not found.' });
+  t.students[sc].suspended = !!suspended;
+  res.json({ success: true, suspended: t.students[sc].suspended });
+});
+
+// GET /api/admin/teachers — list all teachers with their students
 app.get('/api/admin/teachers', (req, res) => {
   if (req.headers['x-admin-secret'] !== process.env.ADMIN_SECRET)
     return res.status(401).json({ error: 'Unauthorized' });
@@ -327,33 +480,36 @@ app.get('/api/admin/teachers', (req, res) => {
     teacherCode: code,
     name: t.name,
     subjects: t.subjects,
+    examModes: t.examModes || [t.examMode || 'cbse12'],
     examMode: t.examMode,
+    suspended: t.suspended || false,
     createdAt: t.createdAt,
-    studentCount: Object.keys(t.students).length
+    studentCount: Object.keys(t.students).length,
+    students: Object.entries(t.students).map(([sc, s]) => ({
+      studentCode: sc, name: s.name, joinedAt: s.joinedAt,
+      suspended: s.suspended || false,
+      totalQuizzes: s.progress?.length || 0,
+    })),
   }));
   res.json({ success: true, teachers, totalTeachers: teachers.length });
 });
 
-// POST /api/admin/teacher/create — admin creates teacher with auto-generated password
+// POST /api/admin/teacher/create
 app.post('/api/admin/teacher/create', (req, res) => {
   if (req.headers['x-admin-secret'] !== process.env.ADMIN_SECRET)
     return res.status(401).json({ error: 'Unauthorized' });
-  const { name, subjects, examMode } = req.body;
+  const { name, subjects, examModes, examMode } = req.body;
   if (!name || !subjects || !Array.isArray(subjects) || subjects.length === 0)
     return res.status(400).json({ error: 'Name and at least one subject required.' });
+  const modes = Array.isArray(examModes) && examModes.length > 0 ? examModes : [examMode || 'cbse12'];
   const teacherCode = genCode(6);
   const teacherKey  = genCode(12);
-  const password    = genCode(8); // auto-generated, shown once to admin
+  const password    = genCode(8);
   const { hash, salt } = hashPass(password);
   teacherStore[teacherCode] = {
-    name: name.slice(0, 60),
-    passwordHash: hash,
-    passwordSalt: salt,
-    subjects: subjects.slice(0, 8),
-    examMode: examMode || 'cbse12',
-    teacherKey,
-    createdAt: new Date().toISOString(),
-    students: {}
+    name: name.slice(0, 60), passwordHash: hash, passwordSalt: salt,
+    subjects: subjects.slice(0, 12), examModes: modes, examMode: modes[0],
+    teacherKey, suspended: false, createdAt: new Date().toISOString(), students: {}
   };
   console.log(`[ADMIN] Created teacher: ${name} → Code: ${teacherCode}`);
   res.json({ success: true, teacherCode, password, name: teacherStore[teacherCode].name });
@@ -367,7 +523,41 @@ app.delete('/api/admin/teacher/:code', (req, res) => {
   if (!teacherStore[code]) return res.status(404).json({ error: 'Teacher not found.' });
   delete teacherStore[code];
   console.log(`[ADMIN] Deleted teacher: ${code}`);
-  res.json({ success: true, message: `Teacher ${code} deleted.` });
+  res.json({ success: true });
+});
+
+// PATCH /api/admin/teacher/:code/status  — suspend or reactivate teacher
+app.patch('/api/admin/teacher/:code/status', (req, res) => {
+  if (req.headers['x-admin-secret'] !== process.env.ADMIN_SECRET)
+    return res.status(401).json({ error: 'Unauthorized' });
+  const code = req.params.code.toUpperCase();
+  if (!teacherStore[code]) return res.status(404).json({ error: 'Teacher not found.' });
+  teacherStore[code].suspended = !!req.body.suspended;
+  console.log(`[ADMIN] Teacher ${code} suspended=${teacherStore[code].suspended}`);
+  res.json({ success: true, suspended: teacherStore[code].suspended });
+});
+
+// DELETE /api/admin/teacher/:teacherCode/student/:studentCode
+app.delete('/api/admin/teacher/:teacherCode/student/:studentCode', (req, res) => {
+  if (req.headers['x-admin-secret'] !== process.env.ADMIN_SECRET)
+    return res.status(401).json({ error: 'Unauthorized' });
+  const tc = req.params.teacherCode.toUpperCase();
+  const sc = req.params.studentCode.toUpperCase();
+  if (!teacherStore[tc]) return res.status(404).json({ error: 'Teacher not found.' });
+  if (!teacherStore[tc].students[sc]) return res.status(404).json({ error: 'Student not found.' });
+  delete teacherStore[tc].students[sc];
+  res.json({ success: true });
+});
+
+// PATCH /api/admin/teacher/:teacherCode/student/:studentCode/status
+app.patch('/api/admin/teacher/:teacherCode/student/:studentCode/status', (req, res) => {
+  if (req.headers['x-admin-secret'] !== process.env.ADMIN_SECRET)
+    return res.status(401).json({ error: 'Unauthorized' });
+  const tc = req.params.teacherCode.toUpperCase();
+  const sc = req.params.studentCode.toUpperCase();
+  if (!teacherStore[tc] || !teacherStore[tc].students[sc]) return res.status(404).json({ error: 'Not found.' });
+  teacherStore[tc].students[sc].suspended = !!req.body.suspended;
+  res.json({ success: true, suspended: teacherStore[tc].students[sc].suspended });
 });
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
